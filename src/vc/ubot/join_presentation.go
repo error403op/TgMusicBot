@@ -31,8 +31,15 @@ func (ctx *Context) joinPresentation(chatId int64, join bool) error {
 		}
 	} else if connectionMode == ntgcalls.RtcConnection {
 		if join {
-			if !slices.Contains(ctx.presentations, chatId) {
+			ctx.participantsMutex.Lock()
+			shouldJoin := !slices.Contains(ctx.presentations, chatId)
+			ctx.participantsMutex.Unlock()
+
+			if shouldJoin {
+				ctx.participantsMutex.Lock()
 				ctx.waitConnect[chatId] = make(chan error)
+				ctx.participantsMutex.Unlock()
+
 				jsonParams, err := ctx.binding.InitPresentation(chatId)
 				if err != nil {
 					return err
@@ -65,23 +72,42 @@ func (ctx *Context) joinPresentation(chatId int64, join bool) error {
 				if err != nil {
 					return err
 				}
-				<-ctx.waitConnect[chatId]
-				ctx.presentations = append(ctx.presentations, chatId)
+				ctx.participantsMutex.Lock()
+				waitChan := ctx.waitConnect[chatId]
+				ctx.participantsMutex.Unlock()
+
+				if waitChan != nil {
+					<-waitChan
+				}
+
+				ctx.participantsMutex.Lock()
+				if !slices.Contains(ctx.presentations, chatId) {
+					ctx.presentations = append(ctx.presentations, chatId)
+				}
+				ctx.participantsMutex.Unlock()
 			}
-		} else if slices.Contains(ctx.presentations, chatId) {
-			ctx.presentations = stdRemove(ctx.presentations, chatId)
-			err = ctx.binding.StopPresentation(chatId)
-			if err != nil {
-				return err
+		} else {
+			ctx.participantsMutex.Lock()
+			shouldLeave := slices.Contains(ctx.presentations, chatId)
+			if shouldLeave {
+				ctx.presentations = stdRemove(ctx.presentations, chatId)
 			}
-			ctx.inputGroupCallsMutex.RLock()
-			inputGroupCall := ctx.inputGroupCalls[chatId]
-			ctx.inputGroupCallsMutex.RUnlock()
-			_, err = ctx.App.PhoneLeaveGroupCallPresentation(
-				inputGroupCall,
-			)
-			if err != nil {
-				return err
+			ctx.participantsMutex.Unlock()
+
+			if shouldLeave {
+				err = ctx.binding.StopPresentation(chatId)
+				if err != nil {
+					return err
+				}
+				ctx.inputGroupCallsMutex.RLock()
+				inputGroupCall := ctx.inputGroupCalls[chatId]
+				ctx.inputGroupCallsMutex.RUnlock()
+				_, err = ctx.App.PhoneLeaveGroupCallPresentation(
+					inputGroupCall,
+				)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
